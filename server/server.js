@@ -197,7 +197,7 @@ function leaveRoom(ws, roomCode) {
     }
     room.guest = null
   }
-})
+}
 
 // Heartbeat: check for dead connections every 30 seconds
 const heartbeatInterval = setInterval(() => {
