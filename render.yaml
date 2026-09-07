@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: wall-go-multiplayer
+    runtime: node
+    region: oregon
+    plan: free
+    buildCommand: "npm install --legacy-peer-deps && npm run build && cd server && npm install"
+    startCommand: "node server/server.js"
+    envVars:
+      - key: PORT
+        value: "10000"
