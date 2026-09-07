@@ -5,7 +5,7 @@ import { MultiplayerClient, type ConnectionStatus } from '@/multiplayer/client'
 import { WS_SERVER_URL } from '@/multiplayer/config'
 import type { Player } from '@/lib/types'
 
-type LobbyState = 'menu' | 'creating' | 'waiting' | 'joining' | 'connected' | 'error'
+type LobbyState = 'menu' | 'creating' | 'waiting' | 'joining' | 'rejoining' | 'connected' | 'error'
 
 export default function RemoteLobby({
   onReady,
@@ -17,6 +17,8 @@ export default function RemoteLobby({
   const [lobbyState, setLobbyState] = useState<LobbyState>('menu')
   const [roomCode, setRoomCode] = useState('')
   const [joinCode, setJoinCode] = useState('')
+  const [rejoinCode, setRejoinCode] = useState('')
+  const [rejoinSide, setRejoinSide] = useState<'R' | 'B'>('R')
   const [errorMsg, setErrorMsg] = useState('')
   const [connStatus, setConnStatus] = useState<ConnectionStatus>('disconnected')
   const clientRef = useRef<MultiplayerClient | null>(null)
@@ -71,7 +73,7 @@ export default function RemoteLobby({
         }
       }, 100)
       setTimeout(() => clearInterval(checkCode), 5000)
-    } catch (e) {
+    } catch {
       setErrorMsg('Failed to connect to server. Make sure the server is running.')
       setLobbyState('error')
     }
@@ -108,16 +110,57 @@ export default function RemoteLobby({
           setLobbyState('error')
         }
       }, 5000)
-    } catch (e) {
+    } catch {
       setErrorMsg('Failed to connect to server. Make sure the server is running.')
       setLobbyState('error')
     }
   }, [joinCode, onReady])
 
+  const connectAndRejoin = useCallback(async () => {
+    if (!rejoinCode.trim()) return
+    setLobbyState('rejoining')
+    setErrorMsg('')
+    try {
+      const client = new MultiplayerClient(WS_SERVER_URL)
+      clientRef.current = client
+      const side: Player = rejoinSide
+      client.setCallbacks({
+        onStatusChange: (s) => setConnStatus(s),
+        onRejoined: () => {
+          setLobbyState('connected')
+          setTimeout(() => onReady(client, side), 500)
+        },
+        onOpponentLeft: () => {
+          setErrorMsg('Opponent left the room')
+          setLobbyState('error')
+        },
+      })
+      await client.connect()
+      client.rejoinRoom(rejoinCode.trim().toUpperCase(), side)
+
+      const checkRejoin = setInterval(() => {
+        if (client.roomCode) {
+          setLobbyState('connected')
+          clearInterval(checkRejoin)
+          setTimeout(() => onReady(client, side), 500)
+        }
+      }, 100)
+      setTimeout(() => {
+        clearInterval(checkRejoin)
+        if (!client.roomCode) {
+          setErrorMsg('Room not found or expired. Room codes expire after 30 minutes.')
+          setLobbyState('error')
+        }
+      }, 5000)
+    } catch {
+      setErrorMsg('Failed to connect to server. Make sure the server is running.')
+      setLobbyState('error')
+    }
+  }, [rejoinCode, rejoinSide, onReady])
+
   useEffect(() => {
     return () => {
       // Don't disconnect here - the client is passed to Game.tsx via onReady
-      // and stays alive. Disconnection is handled by App.tsx handleHome.
     }
   }, [])
 
@@ -159,6 +202,51 @@ export default function RemoteLobby({
               Join Room
             </GameButton>
           </div>
+
+          {/* Rejoin section */}
+          <div className="border-t border-zinc-200 dark:border-zinc-700 pt-4 mt-2">
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-2 text-center">
+              Disconnected? Rejoin your room:
+            </p>
+            <div className="flex gap-2 mb-2">
+              <input
+                type="text"
+                value={rejoinCode}
+                onChange={(e) => setRejoinCode(e.target.value.toUpperCase())}
+                placeholder="Room code"
+                maxLength={4}
+                className="flex-1 rounded border border-zinc-300 dark:border-zinc-600 px-3 py-2 bg-white dark:bg-zinc-800 text-zinc-800 dark:text-zinc-100 text-center text-lg font-mono uppercase tracking-widest focus:outline-none focus:ring-2 focus:ring-indigo-400"
+              />
+              <button
+                onClick={() => setRejoinSide('R')}
+                className={`px-3 py-2 rounded border-2 font-bold transition-colors ${
+                  rejoinSide === 'R'
+                    ? 'bg-rose-500 text-white border-rose-500'
+                    : 'bg-white dark:bg-zinc-800 text-zinc-400 border-zinc-300 dark:border-zinc-600'
+                }`}
+              >
+                Red
+              </button>
+              <button
+                onClick={() => setRejoinSide('B')}
+                className={`px-3 py-2 rounded border-2 font-bold transition-colors ${
+                  rejoinSide === 'B'
+                    ? 'bg-indigo-500 text-white border-indigo-500'
+                    : 'bg-white dark:bg-zinc-800 text-zinc-400 border-zinc-300 dark:border-zinc-600'
+                }`}
+              >
+                Blue
+              </button>
+            </div>
+            <GameButton
+              onClick={connectAndRejoin}
+              disabled={!rejoinCode.trim()}
+              className="text-base py-2"
+            >
+              Rejoin Room
+            </GameButton>
+          </div>
+
           <GameButton
             onClick={onBack}
             className="!bg-transparent !shadow-none !border-0 text-sm text-zinc-500 hover:underline hover:text-zinc-700 dark:hover:text-zinc-200 transition-colors cursor-pointer"
@@ -208,6 +296,13 @@ export default function RemoteLobby({
         </div>
       )}
 
+      {lobbyState === 'rejoining' && (
+        <div className="flex flex-col items-center gap-4 animate-fade-in">
+          <div className="animate-spin w-8 h-8 border-2 border-indigo-400 border-t-transparent rounded-full" />
+          <p className="text-zinc-600 dark:text-zinc-300">Rejoining room {rejoinCode}...</p>
+        </div>
+      )}
+
       {lobbyState === 'connected' && (
         <div className="flex flex-col items-center gap-4 animate-fade-in">
           <div className="text-4xl">🎮</div>
@@ -226,6 +321,7 @@ export default function RemoteLobby({
               setLobbyState('menu')
               setRoomCode('')
               setJoinCode('')
+              setRejoinCode('')
               setErrorMsg('')
             }}
             className="text-lg py-2"
@@ -235,7 +331,7 @@ export default function RemoteLobby({
         </div>
       )}
 
-      {connStatus === 'connecting' && lobbyState !== 'creating' && lobbyState !== 'joining' && (
+      {connStatus === 'connecting' && lobbyState !== 'creating' && lobbyState !== 'joining' && lobbyState !== 'rejoining' && (
         <p className="text-zinc-400 text-sm mt-4">Connecting...</p>
       )}
     </div>

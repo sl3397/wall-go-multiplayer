@@ -120,7 +120,7 @@ export default function Game({
       return
     }
     if (isRemote) {
-      useGame.getState().setHumanSide(localSide)
+      useGame.getState().setHumanSide(null)
     } else if (gameMode === 'ai') {
       useGame.getState().setHumanSide(aiSide === 'R' ? 'B' : 'R')
     } else {
@@ -195,6 +195,25 @@ export default function Game({
       onOpponentLeft: () => {
         setShowConfirm(false)
         onRemoteHomeRef.current()
+      },
+      onRejoined: (snapshot) => {
+        if (snapshot) {
+          isApplyingRemoteRef.current = true
+          try {
+            useGame.getState().loadSnapshot(snapshot)
+          } catch (e) {
+            console.error('[WallGo] Failed to apply rejoin state:', e)
+          } finally {
+            isApplyingRemoteRef.current = false
+          }
+        }
+      },
+      onOpponentRejoined: () => {
+        // Opponent reconnected - if we have current state, send it
+        if (!isApplyingRemoteRef.current && remoteClientRef.current) {
+          const snap = snapshotFromState(useGame.getState())
+          remoteClientRef.current.sendState(snap)
+        }
       },
     })
 
@@ -304,7 +323,12 @@ export default function Game({
         <TurnTimer timeLeft={timeLeft} timeLimit={turnTimeLimit} turn={turn} phase={phase} />
       )}
       {isRemote && (
-        <div className="text-sm font-medium px-3 py-1.5 rounded-full bg-white/70 dark:bg-zinc-800/80 shadow-sm border border-zinc-200 dark:border-zinc-700 flex items-center gap-2">
+        <div className="text-sm font-medium px-3 py-1.5 rounded-full bg-white/70 dark:bg-zinc-800/80 shadow-sm border border-zinc-200 dark:border-zinc-700 flex items-center gap-3">
+          {remoteClient?.roomCode && (
+            <span className="text-zinc-600 dark:text-zinc-300 font-mono">
+              Room: {remoteClient.roomCode}
+            </span>
+          )}
           {connStatus === 'disconnected' && (
             <span className="text-rose-500 dark:text-rose-400 flex items-center gap-1">
               <span className="inline-block w-2 h-2 rounded-full bg-rose-500" />
@@ -336,10 +360,10 @@ export default function Game({
         </div>
       )}
       <Navbar
-        onUndo={isRemote ? undefined : undo}
-        onRedo={isRemote ? undefined : redo}
-        canUndo={!isRemote && canUndo}
-        canRedo={!isRemote && canRedo}
+        onUndo={undo}
+        onRedo={redo}
+        canUndo={canUndo}
+        canRedo={canRedo}
         phase={phase}
         onHome={handleHome}
         dark={dark}

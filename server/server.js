@@ -3,9 +3,11 @@ import { createServer } from 'http'
 import { readFile, stat } from 'fs/promises'
 import { join, extname, resolve } from 'path'
 import { fileURLToPath } from 'url'
+import Redis from 'ioredis'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 const PORT = process.env.PORT || 8080
+const ROOM_TTL = 1800 // 30 minutes in seconds
 
 const DIST_DIR = resolve(__dirname, '..', 'dist')
 
@@ -22,6 +24,17 @@ const MIME_TYPES = {
   '.webp': 'image/webp',
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
+}
+
+const redis = process.env.REDIS_URL
+  ? new Redis(process.env.REDIS_URL, { tls: { rejectUnauthorized: false } })
+  : null
+
+if (redis) {
+  redis.on('error', (err) => console.error('[Redis] Error:', err))
+  redis.on('connect', () => console.log('[Redis] Connected'))
+} else {
+  console.warn('[Redis] No REDIS_URL set, running without persistence')
 }
 
 const server = createServer(async (req, res) => {
@@ -68,13 +81,8 @@ const server = createServer(async (req, res) => {
 
 const wss = new WebSocketServer({ noServer: true })
 
-server.on('error', (err) => {
-  console.error('[Server] HTTP server error:', err)
-})
-
-wss.on('error', (err) => {
-  console.error('[Server] WebSocketServer error:', err)
-})
+server.on('error', (err) => console.error('[Server] HTTP server error:', err))
+wss.on('error', (err) => console.error('[Server] WebSocketServer error:', err))
 
 server.on('upgrade', (request, socket, head) => {
   wss.handleUpgrade(request, socket, head, (ws) => {
@@ -105,20 +113,44 @@ function safeSend(ws, data) {
   }
 }
 
+async function saveRoomState(code, snapshot) {
+  if (!redis) return
+  try {
+    await redis.set(`room:${code}:state`, JSON.stringify(snapshot), 'EX', ROOM_TTL)
+  } catch (err) {
+    console.error('[Redis] Failed to save state:', err)
+  }
+}
+
+async function getRoomState(code) {
+  if (!redis) return null
+  try {
+    const data = await redis.get(`room:${code}:state`)
+    return data ? JSON.parse(data) : null
+  } catch (err) {
+    console.error('[Redis] Failed to get state:', err)
+    return null
+  }
+}
+
+async function touchRoomTTL(code) {
+  if (!redis) return
+  try {
+    await redis.expire(`room:${code}:state`, ROOM_TTL)
+  } catch (err) {
+    // non-critical
+  }
+}
+
 wss.on('connection', (ws) => {
   let currentRoom = null
   let playerSide = null
 
-  // CRITICAL: must have error handler, otherwise unhandled error crashes the process
   ws.on('error', (err) => {
     console.error('[Server] WebSocket error:', err)
   })
 
-  ws.on('pong', () => {
-    // browser auto-responds to protocol-level ping
-  })
-
-  ws.on('message', (data) => {
+  ws.on('message', async (data) => {
     let msg
     try {
       msg = JSON.parse(data.toString())
@@ -165,6 +197,56 @@ wss.on('connection', (ws) => {
         break
       }
 
+      case 'rejoin': {
+        // A player reconnecting to an existing room
+        const room = rooms.get(msg.roomCode)
+        if (!room) {
+          // Room might still exist in Redis but not in memory (server restarted)
+          // Recreate room in memory - the player who rejoins first becomes host temporarily
+          // The other player will also rejoin and take the guest slot
+          // We need to figure out which side this player was
+          const savedState = await getRoomState(msg.roomCode)
+          if (savedState) {
+            // Room exists in Redis, recreate in memory
+            rooms.set(msg.roomCode, { host: ws, guest: null })
+            currentRoom = msg.roomCode
+            playerSide = msg.side || 'R'
+            if (msg.side === 'B') {
+              // This player was guest, but we need a host...
+              // Just set them as guest in a new room object
+              rooms.set(msg.roomCode, { host: null, guest: ws })
+            }
+            safeSend(ws, JSON.stringify({ type: 'rejoined', roomCode: msg.roomCode, side: playerSide, snapshot: savedState }))
+            await touchRoomTTL(msg.roomCode)
+          } else {
+            safeSend(ws, JSON.stringify({ type: 'error', message: 'Room not found or expired' }))
+          }
+          return
+        }
+
+        // Room exists in memory - rejoin with the correct side
+        currentRoom = msg.roomCode
+        playerSide = msg.side
+
+        if (msg.side === 'R' && !room.host) {
+          room.host = ws
+        } else if (msg.side === 'B' && !room.guest) {
+          room.guest = ws
+        }
+
+        // Send current state from Redis
+        const savedState = await getRoomState(msg.roomCode)
+        safeSend(ws, JSON.stringify({ type: 'rejoined', roomCode: msg.roomCode, side: playerSide, snapshot: savedState }))
+
+        // Notify opponent if they're connected
+        const opponent = msg.side === 'R' ? room.guest : room.host
+        if (opponent && opponent.readyState === 1) {
+          safeSend(opponent, JSON.stringify({ type: 'opponent_rejoined' }))
+        }
+        await touchRoomTTL(msg.roomCode)
+        break
+      }
+
       case 'state': {
         const room = rooms.get(currentRoom)
         if (!room) return
@@ -172,6 +254,8 @@ wss.on('connection', (ws) => {
         if (target && target.readyState === 1) {
           safeSend(target, JSON.stringify({ type: 'state', snapshot: msg.snapshot }))
         }
+        // Save to Redis for persistence
+        await saveRoomState(currentRoom, msg.snapshot)
         break
       }
 
@@ -182,17 +266,25 @@ wss.on('connection', (ws) => {
         if (target && target.readyState === 1) {
           safeSend(target, JSON.stringify({ type: 'reset' }))
         }
-        break
-      }
-
-      case 'ping': {
-        safeSend(ws, JSON.stringify({ type: 'pong' }))
+        // Clear Redis state for new game
+        if (redis) {
+          try {
+            await redis.del(`room:${currentRoom}:state`)
+          } catch (e) {
+            // non-critical
+          }
+        }
         break
       }
 
       case 'leave': {
         leaveRoom(ws, currentRoom)
         currentRoom = null
+        break
+      }
+
+      case 'ping': {
+        safeSend(ws, JSON.stringify({ type: 'pong' }))
         break
       }
     }
@@ -208,15 +300,24 @@ function leaveRoom(ws, roomCode) {
   const room = rooms.get(roomCode)
   if (!room) return
   if (room.host === ws) {
+    // Don't delete room immediately - allow reconnection
+    // Just mark host as disconnected
+    room.host = null
     if (room.guest && room.guest.readyState === 1) {
       safeSend(room.guest, JSON.stringify({ type: 'opponent_left' }))
     }
-    rooms.delete(roomCode)
+    // If both slots empty, clean up
+    if (!room.guest) {
+      rooms.delete(roomCode)
+    }
   } else if (room.guest === ws) {
+    room.guest = null
     if (room.host && room.host.readyState === 1) {
       safeSend(room.host, JSON.stringify({ type: 'opponent_left' }))
     }
-    room.guest = null
+    if (!room.host) {
+      rooms.delete(roomCode)
+    }
   }
 }
 
@@ -236,7 +337,6 @@ wss.on('close', () => {
   clearInterval(heartbeatInterval)
 })
 
-// Prevent process crash from unhandled errors
 process.on('uncaughtException', (err) => {
   console.error('[Server] Uncaught exception:', err)
 })
@@ -247,5 +347,4 @@ process.on('unhandledRejection', (err) => {
 
 server.listen(PORT, () => {
   console.log(`Wall Go server running on http://localhost:${PORT}`)
-  console.log(`Open the URL above in your browser to play!`)
 })

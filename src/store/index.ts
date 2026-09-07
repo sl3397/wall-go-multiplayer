@@ -287,6 +287,7 @@ export const useGame = create<State>((_set, get) => {
     },
     loadSnapshot(snap: GameSnapshot) {
       const restored = restoreSnapshot(snap)
+      const currentHistory = get()._history
       set({
         board: restored.board,
         turn: restored.turn,
@@ -299,7 +300,7 @@ export const useGame = create<State>((_set, get) => {
         stonesPlaced: restored.stonesPlaced,
         result: restored.result,
         skipReason: restored.skipReason,
-        _history: [snapshotFromState(restored)],
+        _history: [...currentHistory, snapshotFromState(restored)],
         _future: [],
       })
     },

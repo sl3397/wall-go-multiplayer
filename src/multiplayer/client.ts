@@ -8,7 +8,9 @@ export interface MultiplayerCallbacks {
   onStateUpdate?: (snapshot: GameSnapshot) => void
   onOpponentLeft?: () => void
   onOpponentJoined?: () => void
+  onOpponentRejoined?: () => void
   onReset?: () => void
+  onRejoined?: (snapshot: GameSnapshot | null) => void
 }
 
 export class MultiplayerClient {
@@ -35,14 +37,15 @@ export class MultiplayerClient {
     return new Promise((resolve, reject) => {
       this.shouldReconnect = true
       this.callbacks.onStatusChange?.('connecting')
+
+      let resolved = false
+
       try {
         this.ws = new WebSocket(this.serverUrl)
       } catch (e) {
         reject(e)
         return
       }
-
-      let resolved = false
 
       this.ws.onopen = () => {
         resolved = true
@@ -55,17 +58,14 @@ export class MultiplayerClient {
       this.ws.onclose = () => {
         this.callbacks.onStatusChange?.('disconnected')
         this.stopHeartbeat()
-        if (this.shouldReconnect && !resolved) {
-          // Connection failed during connect()
+        if (!resolved) {
           reject(new Error('WebSocket connection failed'))
         } else if (this.shouldReconnect) {
-          // Connection was lost, try to reconnect
           this.scheduleReconnect()
         }
       }
 
       this.ws.onerror = () => {
-        // Error is followed by close, which handles reconnection
         if (!resolved) {
           reject(new Error('WebSocket connection failed'))
         }
@@ -80,7 +80,7 @@ export class MultiplayerClient {
   private scheduleReconnect() {
     if (this.reconnectTimer) return
     this.callbacks.onStatusChange?.('connecting')
-    this.reconnectTimer = setTimeout(async () => {
+    this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       if (!this.shouldReconnect) return
 
@@ -93,8 +93,8 @@ export class MultiplayerClient {
           this.reconnectDelay = 2000
 
           // Rejoin room if we were in one
-          if (this.roomCode) {
-            this.ws?.send(JSON.stringify({ type: 'join', roomCode: this.roomCode }))
+          if (this.roomCode && this.side) {
+            this.ws?.send(JSON.stringify({ type: 'rejoin', roomCode: this.roomCode, side: this.side }))
           }
         }
 
@@ -114,7 +114,7 @@ export class MultiplayerClient {
         this.ws.onmessage = (event) => {
           this.handleMessage(event.data)
         }
-      } catch (e) {
+      } catch {
         this.reconnectDelay = Math.min(this.reconnectDelay * 2, 10000)
         this.scheduleReconnect()
       }
@@ -131,15 +131,37 @@ export class MultiplayerClient {
 
     switch (msg.type) {
       case 'created':
+        this.roomCode = msg.roomCode
+        this.side = msg.side
+        break
       case 'joined':
         this.roomCode = msg.roomCode
         this.side = msg.side
-        if (msg.type === 'joined') {
-          this.callbacks.onOpponentJoined?.()
+        this.callbacks.onOpponentJoined?.()
+        break
+      case 'rejoined':
+        this.roomCode = msg.roomCode
+        this.side = msg.side
+        if (msg.snapshot) {
+          this.applyingRemote = true
+          try {
+            const snapshot = deserializeSnapshot(JSON.stringify(msg.snapshot))
+            this.callbacks.onRejoined?.(snapshot)
+          } catch (e) {
+            console.error('[WallGo] Failed to deserialize rejoin snapshot:', e)
+            this.callbacks.onRejoined?.(null)
+          } finally {
+            this.applyingRemote = false
+          }
+        } else {
+          this.callbacks.onRejoined?.(null)
         }
         break
       case 'opponent_joined':
         this.callbacks.onOpponentJoined?.()
+        break
+      case 'opponent_rejoined':
+        this.callbacks.onOpponentRejoined?.()
         break
       case 'opponent_left':
         this.callbacks.onOpponentLeft?.()
@@ -173,6 +195,13 @@ export class MultiplayerClient {
   joinRoom(code: string) {
     if (!this.ws || this.ws.readyState !== 1) return
     this.ws.send(JSON.stringify({ type: 'join', roomCode: code }))
+  }
+
+  rejoinRoom(code: string, side: Player) {
+    if (!this.ws || this.ws.readyState !== 1) return
+    this.roomCode = code
+    this.side = side
+    this.ws.send(JSON.stringify({ type: 'rejoin', roomCode: code, side }))
   }
 
   sendState(snapshot: GameSnapshot) {
@@ -216,7 +245,7 @@ export class MultiplayerClient {
       if (this.ws && this.ws.readyState === 1) {
         try {
           this.ws.send(JSON.stringify({ type: 'ping' }))
-        } catch (e) {
+        } catch {
           // ignore
         }
       }
