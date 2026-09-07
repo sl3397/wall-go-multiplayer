@@ -1,4 +1,4 @@
-import type { GameSnapshot } from '@/lib/types'
+import type { GameSnapshot, Player } from '@/lib/types'
 import { serializeSnapshot, deserializeSnapshot } from './serialize'
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected'
@@ -14,9 +14,14 @@ export interface MultiplayerCallbacks {
 export class MultiplayerClient {
   private ws: WebSocket | null = null
   private callbacks: MultiplayerCallbacks = {}
-  private isApplyingRemote = false
+  private applyingRemote = false
+  private serverUrl: string
+  roomCode: string | null = null
+  side: Player | null = null
 
-  constructor(private serverUrl: string) {}
+  constructor(serverUrl: string) {
+    this.serverUrl = serverUrl
+  }
 
   setCallbacks(callbacks: MultiplayerCallbacks) {
     this.callbacks = callbacks
@@ -71,10 +76,10 @@ export class MultiplayerClient {
         break
       case 'state':
         if (msg.snapshot) {
-          this.isApplyingRemote = true
+          this.applyingRemote = true
           const snapshot = deserializeSnapshot(JSON.stringify(msg.snapshot))
           this.callbacks.onStateUpdate?.(snapshot)
-          this.isApplyingRemote = false
+          this.applyingRemote = false
         }
         break
       case 'reset':
@@ -82,9 +87,6 @@ export class MultiplayerClient {
         break
     }
   }
-
-  roomCode: string | null = null
-  side: 'R' | 'B' | null = null
 
   createRoom() {
     if (!this.ws || this.ws.readyState !== 1) return
@@ -98,7 +100,7 @@ export class MultiplayerClient {
 
   sendState(snapshot: GameSnapshot) {
     if (!this.ws || this.ws.readyState !== 1) return
-    if (this.isApplyingRemote) return
+    if (this.applyingRemote) return
     const data = serializeSnapshot(snapshot)
     this.ws.send(JSON.stringify({ type: 'state', snapshot: JSON.parse(data) }))
   }
@@ -122,6 +124,6 @@ export class MultiplayerClient {
   }
 
   get isRemoteApplying() {
-    return this.isApplyingRemote
+    return this.applyingRemote
   }
 }

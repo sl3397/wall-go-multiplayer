@@ -1,13 +1,12 @@
 // Zustand store for Wall Go with robust undo/redo and deep copy history pattern
 import { create } from 'zustand'
-import { PLAYER_LIST, type Pos, type WallDir, type State } from '@/lib/types'
+import { PLAYER_LIST, type Pos, type WallDir, type State, type GameSnapshot } from '@/lib/types'
 import { makeInitialState, snapshotFromState, restoreSnapshot } from './gameState'
 import { createHistoryHandlers } from './history'
 import { placingTurnIndex, advanceTurn } from './actions'
 import { isLegalMove } from '@/utils/move'
 import { checkGameEnd } from '@/utils/game'
 import { isHumanTurn } from '@/utils/player'
-
 // This store uses a functional set pattern for all mutating actions.
 // Each mutation pushes a deep copy of the current state to history BEFORE mutation.
 // All mutations operate on a deep copy, and the new state is returned with updated _history/_future.
@@ -48,7 +47,6 @@ export const useGame = create<State>((_set, get) => {
     set,
     (state) => {
       // snapshot 只存遊戲狀態，不存 _history/_future/undo/redo/canUndo/canRedo
-
       const {
         _history: _,
         _future: __,
@@ -63,7 +61,6 @@ export const useGame = create<State>((_set, get) => {
     restoreSnapshot,
   )
   const PLAYERS = [...PLAYER_LIST]
-
   // 初始化時 _history 應包含初始狀態
   const initial = makeInitialState()
   return {

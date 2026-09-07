@@ -50,10 +50,11 @@ export default function RemoteLobby({
       client.setCallbacks({
         onStatusChange: (s) => setConnStatus(s),
         onOpponentJoined: () => {
-          setLobbyState('connected')
-          setTimeout(() => {
-            if (client.side) onReady(client, client.side)
-          }, 500)
+          const side = client.side
+          if (side) {
+            setLobbyState('connected')
+            setTimeout(() => onReady(client, side), 500)
+          }
         },
         onOpponentLeft: () => {
           setErrorMsg('Opponent left the room')
@@ -93,10 +94,11 @@ export default function RemoteLobby({
       await client.connect()
       client.joinRoom(joinCode.trim().toUpperCase())
       const checkJoin = setInterval(() => {
-        if (client.side) {
+        const side = client.side
+        if (side) {
           setLobbyState('connected')
           clearInterval(checkJoin)
-          setTimeout(() => onReady(client, client.side), 500)
+          setTimeout(() => onReady(client, side), 500)
         }
       }, 100)
       setTimeout(() => {
