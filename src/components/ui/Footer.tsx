@@ -9,7 +9,7 @@ export default function Footer() {
     >
       <div className="flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-4">
         <span>
-          © 2025 Celia Liang &nbsp;·&nbsp; Made with <span className="text-rose-400">♥</span>
+          © 2026 Celia Liang &nbsp;·&nbsp; Play anywhere <span className="text-rose-400">♥</span>
         </span>
         <span className="text-xs text-zinc-400 dark:text-zinc-500">
           Special thanks to <a href="https://github.com/schaoss/wall-go" target="_blank" rel="noopener noreferrer" className="underline hover:text-indigo-500 dark:hover:text-indigo-300 transition-colors">Gary Chu</a> for the original Wall Go project
