@@ -16,6 +16,7 @@ export class MultiplayerClient {
   private callbacks: MultiplayerCallbacks = {}
   private applyingRemote = false
   private serverUrl: string
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null
   roomCode: string | null = null
   side: Player | null = null
 
@@ -24,7 +25,7 @@ export class MultiplayerClient {
   }
 
   setCallbacks(callbacks: MultiplayerCallbacks) {
-    this.callbacks = callbacks
+    this.callbacks = { ...this.callbacks, ...callbacks }
   }
 
   connect(): Promise<void> {
@@ -38,13 +39,15 @@ export class MultiplayerClient {
       }
       this.ws.onopen = () => {
         this.callbacks.onStatusChange?.('connected')
+        this.startHeartbeat()
         resolve()
       }
       this.ws.onclose = () => {
         this.callbacks.onStatusChange?.('disconnected')
+        this.stopHeartbeat()
       }
-      this.ws.onerror = (e) => {
-        reject(e)
+      this.ws.onerror = () => {
+        reject(new Error('WebSocket connection failed'))
       }
       this.ws.onmessage = (event) => {
         this.handleMessage(event.data)
@@ -59,6 +62,7 @@ export class MultiplayerClient {
     } catch {
       return
     }
+
     switch (msg.type) {
       case 'created':
       case 'joined':
@@ -77,13 +81,20 @@ export class MultiplayerClient {
       case 'state':
         if (msg.snapshot) {
           this.applyingRemote = true
-          const snapshot = deserializeSnapshot(JSON.stringify(msg.snapshot))
-          this.callbacks.onStateUpdate?.(snapshot)
-          this.applyingRemote = false
+          try {
+            const snapshot = deserializeSnapshot(JSON.stringify(msg.snapshot))
+            this.callbacks.onStateUpdate?.(snapshot)
+          } catch (e) {
+            console.error('[WallGo] Failed to deserialize snapshot:', e)
+          } finally {
+            this.applyingRemote = false
+          }
         }
         break
       case 'reset':
         this.callbacks.onReset?.()
+        break
+      case 'pong':
         break
     }
   }
@@ -101,8 +112,12 @@ export class MultiplayerClient {
   sendState(snapshot: GameSnapshot) {
     if (!this.ws || this.ws.readyState !== 1) return
     if (this.applyingRemote) return
-    const data = serializeSnapshot(snapshot)
-    this.ws.send(JSON.stringify({ type: 'state', snapshot: JSON.parse(data) }))
+    try {
+      const data = serializeSnapshot(snapshot)
+      this.ws.send(JSON.stringify({ type: 'state', snapshot: JSON.parse(data) }))
+    } catch (e) {
+      console.error('[WallGo] Failed to send state:', e)
+    }
   }
 
   sendReset() {
@@ -119,11 +134,32 @@ export class MultiplayerClient {
 
   disconnect() {
     this.leaveRoom()
+    this.stopHeartbeat()
     this.ws?.close()
     this.ws = null
   }
 
+  private startHeartbeat() {
+    this.stopHeartbeat()
+    this.heartbeatInterval = setInterval(() => {
+      if (this.ws && this.ws.readyState === 1) {
+        this.ws.send(JSON.stringify({ type: 'ping' }))
+      }
+    }, 25000)
+  }
+
+  private stopHeartbeat() {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval)
+      this.heartbeatInterval = null
+    }
+  }
+
   get isRemoteApplying() {
     return this.applyingRemote
+  }
+
+  get isConnected() {
+    return this.ws !== null && this.ws.readyState === 1
   }
 }

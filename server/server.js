@@ -1,13 +1,12 @@
 import { WebSocketServer } from 'ws'
 import { createServer } from 'http'
-import { readFile, stat, readdir } from 'fs/promises'
+import { readFile, stat } from 'fs/promises'
 import { join, extname, resolve } from 'path'
 import { fileURLToPath } from 'url'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 const PORT = process.env.PORT || 8080
 
-// Try dist/ (built frontend) at ../dist relative to server/
 const DIST_DIR = resolve(__dirname, '..', 'dist')
 
 const MIME_TYPES = {
@@ -32,7 +31,6 @@ const server = createServer(async (req, res) => {
 
     const filePath = join(DIST_DIR, urlPath)
 
-    // Prevent path traversal
     if (!filePath.startsWith(DIST_DIR)) {
       res.writeHead(403)
       res.end('Forbidden')
@@ -52,7 +50,6 @@ const server = createServer(async (req, res) => {
         res.end('Not found')
       }
     } catch {
-      // SPA fallback - serve index.html for unknown paths
       const indexPath = join(DIST_DIR, 'index.html')
       try {
         const data = await readFile(indexPath)
@@ -94,6 +91,11 @@ function generateRoomCode() {
 wss.on('connection', (ws) => {
   let currentRoom = null
   let playerSide = null
+  let isAlive = true
+
+  ws.on('pong', () => {
+    isAlive = true
+  })
 
   ws.on('message', (data) => {
     let msg
@@ -162,6 +164,11 @@ wss.on('connection', (ws) => {
         break
       }
 
+      case 'ping': {
+        ws.send(JSON.stringify({ type: 'pong' }))
+        break
+      }
+
       case 'leave': {
         leaveRoom(ws, currentRoom)
         currentRoom = null
@@ -190,7 +197,19 @@ function leaveRoom(ws, roomCode) {
     }
     room.guest = null
   }
-}
+})
+
+// Heartbeat: check for dead connections every 30 seconds
+const heartbeatInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.readyState !== 1) return
+    ws.ping()
+  })
+}, 30000)
+
+wss.on('close', () => {
+  clearInterval(heartbeatInterval)
+})
 
 server.listen(PORT, () => {
   console.log(`Wall Go server running on http://localhost:${PORT}`)

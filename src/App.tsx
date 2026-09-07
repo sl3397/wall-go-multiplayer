@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import Game from './components/Game'
 import Footer from './components/ui/Footer'
 import GameModeMenu from './components/ui/GameModeMenu'
@@ -36,14 +36,14 @@ export default function App() {
     }
   }, [dark])
 
-  const handleHome = () => {
+  const handleHome = useCallback(() => {
     if (remoteClient) {
       remoteClient.disconnect()
     }
     setRemoteClient(null)
     setLocalSide(null)
     setMode(null)
-  }
+  }, [remoteClient])
 
   return (
     <>

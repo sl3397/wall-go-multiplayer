@@ -11,7 +11,7 @@ import { HumanAgent, RandomAgent, MinimaxAgent } from '@/agents'
 import { snapshotFromState } from '@/store/gameState'
 import ConfirmDialog from './ui/ConfirmDialog'
 import TurnTimer from './ui/TurnTimer'
-import type { MultiplayerClient } from '@/multiplayer/client'
+import type { MultiplayerClient, ConnectionStatus } from '@/multiplayer/client'
 
 export default function Game({
   gameMode,
@@ -150,40 +150,69 @@ export default function Game({
   }, [])
 
   // --- Remote mode: state sync ---
+  // Use refs to avoid re-running this effect
   const isApplyingRemoteRef = useRef(false)
+  const remoteClientRef = useRef(remoteClient)
+  const onRemoteHomeRef = useRef(onRemoteHome)
+
+  useEffect(() => {
+    remoteClientRef.current = remoteClient
+    onRemoteHomeRef.current = onRemoteHome
+  }, [remoteClient, onRemoteHome])
+
+  // Connection status for UI
+  const [connStatus, setConnStatus] = useState<ConnectionStatus>('disconnected')
 
   useEffect(() => {
     if (!isRemote || !remoteClient) return
 
+    // Set up callbacks ONCE - use refs to avoid stale closures
     remoteClient.setCallbacks({
+      onStatusChange: (s) => {
+        setConnStatus(s)
+      },
       onStateUpdate: (snapshot) => {
         isApplyingRemoteRef.current = true
-        useGame.getState().loadSnapshot(snapshot)
-        isApplyingRemoteRef.current = false
+        try {
+          useGame.getState().loadSnapshot(snapshot)
+        } catch (e) {
+          console.error('[WallGo] Failed to apply remote state:', e)
+        } finally {
+          isApplyingRemoteRef.current = false
+        }
       },
       onReset: () => {
         isApplyingRemoteRef.current = true
-        useGame.getState().resetGame()
-        useGame.getState().setPhase('placing')
-        isApplyingRemoteRef.current = false
+        try {
+          useGame.getState().resetGame()
+          useGame.getState().setPhase('placing')
+        } catch (e) {
+          console.error('[WallGo] Failed to apply remote reset:', e)
+        } finally {
+          isApplyingRemoteRef.current = false
+        }
       },
       onOpponentLeft: () => {
         setShowConfirm(false)
-        onRemoteHome()
+        onRemoteHomeRef.current()
       },
     })
 
+    // Set initial connection status
+    setConnStatus(remoteClient.isConnected ? 'connected' : 'disconnected')
+
+    // Subscribe to store changes - send to opponent
     const unsub = useGame.subscribe((state) => {
-      if (!isApplyingRemoteRef.current && remoteClient) {
+      if (!isApplyingRemoteRef.current && remoteClientRef.current) {
         const snap = snapshotFromState(state)
-        remoteClient.sendState(snap)
+        remoteClientRef.current.sendState(snap)
       }
     })
 
     return () => {
       unsub()
     }
-  }, [isRemote, remoteClient, onRemoteHome])
+  }, [isRemote, remoteClient])
 
   const isHumanTurn = !isRemote && (turnManagerRef.current?.['agents']?.[turn] instanceof HumanAgent)
   const isLocalTurn = isRemote
@@ -275,10 +304,25 @@ export default function Game({
         <TurnTimer timeLeft={timeLeft} timeLimit={turnTimeLimit} turn={turn} phase={phase} />
       )}
       {isRemote && (
-        <div className="text-sm font-medium px-3 py-1.5 rounded-full bg-white/70 dark:bg-zinc-800/80 shadow-sm border border-zinc-200 dark:border-zinc-700">
-          {phase !== 'finished' && (
+        <div className="text-sm font-medium px-3 py-1.5 rounded-full bg-white/70 dark:bg-zinc-800/80 shadow-sm border border-zinc-200 dark:border-zinc-700 flex items-center gap-2">
+          {connStatus === 'disconnected' && (
+            <span className="text-rose-500 dark:text-rose-400 flex items-center gap-1">
+              <span className="inline-block w-2 h-2 rounded-full bg-rose-500" />
+              Disconnected
+            </span>
+          )}
+          {connStatus === 'connecting' && (
+            <span className="text-amber-500 dark:text-amber-400 flex items-center gap-1">
+              <span className="inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+              Reconnecting...
+            </span>
+          )}
+          {phase !== 'finished' && connStatus === 'connected' && (
             isLocalTurn ? (
-              <span className="text-emerald-600 dark:text-emerald-400">● Your turn</span>
+              <span className="text-emerald-600 dark:text-emerald-400">
+                <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 mr-1 align-middle" />
+                Your turn
+              </span>
             ) : (
               <span className="text-zinc-500 dark:text-zinc-400">
                 <span className="inline-block w-3 h-3 rounded-full border-2 border-zinc-300 dark:border-zinc-500 border-t-transparent animate-spin mr-1 align-middle" />
@@ -286,7 +330,7 @@ export default function Game({
               </span>
             )
           )}
-          {phase === 'finished' && (
+          {phase === 'finished' && connStatus === 'connected' && (
             <span className="text-zinc-500 dark:text-zinc-400">Game over</span>
           )}
         </div>
