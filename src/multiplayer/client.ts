@@ -17,6 +17,9 @@ export class MultiplayerClient {
   private applyingRemote = false
   private serverUrl: string
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private shouldReconnect = false
+  private reconnectDelay = 2000
   roomCode: string | null = null
   side: Player | null = null
 
@@ -30,6 +33,7 @@ export class MultiplayerClient {
 
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
+      this.shouldReconnect = true
       this.callbacks.onStatusChange?.('connecting')
       try {
         this.ws = new WebSocket(this.serverUrl)
@@ -37,22 +41,84 @@ export class MultiplayerClient {
         reject(e)
         return
       }
+
+      let resolved = false
+
       this.ws.onopen = () => {
+        resolved = true
         this.callbacks.onStatusChange?.('connected')
         this.startHeartbeat()
+        this.reconnectDelay = 2000
         resolve()
       }
+
       this.ws.onclose = () => {
         this.callbacks.onStatusChange?.('disconnected')
         this.stopHeartbeat()
+        if (this.shouldReconnect && !resolved) {
+          // Connection failed during connect()
+          reject(new Error('WebSocket connection failed'))
+        } else if (this.shouldReconnect) {
+          // Connection was lost, try to reconnect
+          this.scheduleReconnect()
+        }
       }
+
       this.ws.onerror = () => {
-        reject(new Error('WebSocket connection failed'))
+        // Error is followed by close, which handles reconnection
+        if (!resolved) {
+          reject(new Error('WebSocket connection failed'))
+        }
       }
+
       this.ws.onmessage = (event) => {
         this.handleMessage(event.data)
       }
     })
+  }
+
+  private scheduleReconnect() {
+    if (this.reconnectTimer) return
+    this.callbacks.onStatusChange?.('connecting')
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null
+      if (!this.shouldReconnect) return
+
+      try {
+        this.ws = new WebSocket(this.serverUrl)
+
+        this.ws.onopen = () => {
+          this.callbacks.onStatusChange?.('connected')
+          this.startHeartbeat()
+          this.reconnectDelay = 2000
+
+          // Rejoin room if we were in one
+          if (this.roomCode) {
+            this.ws?.send(JSON.stringify({ type: 'join', roomCode: this.roomCode }))
+          }
+        }
+
+        this.ws.onclose = () => {
+          this.callbacks.onStatusChange?.('disconnected')
+          this.stopHeartbeat()
+          if (this.shouldReconnect) {
+            this.reconnectDelay = Math.min(this.reconnectDelay * 2, 10000)
+            this.scheduleReconnect()
+          }
+        }
+
+        this.ws.onerror = () => {
+          // Error is followed by close
+        }
+
+        this.ws.onmessage = (event) => {
+          this.handleMessage(event.data)
+        }
+      } catch (e) {
+        this.reconnectDelay = Math.min(this.reconnectDelay * 2, 10000)
+        this.scheduleReconnect()
+      }
+    }, this.reconnectDelay)
   }
 
   private handleMessage(data: any) {
@@ -133,8 +199,13 @@ export class MultiplayerClient {
   }
 
   disconnect() {
+    this.shouldReconnect = false
     this.leaveRoom()
     this.stopHeartbeat()
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
     this.ws?.close()
     this.ws = null
   }
@@ -143,7 +214,11 @@ export class MultiplayerClient {
     this.stopHeartbeat()
     this.heartbeatInterval = setInterval(() => {
       if (this.ws && this.ws.readyState === 1) {
-        this.ws.send(JSON.stringify({ type: 'ping' }))
+        try {
+          this.ws.send(JSON.stringify({ type: 'ping' }))
+        } catch (e) {
+          // ignore
+        }
       }
     }, 25000)
   }

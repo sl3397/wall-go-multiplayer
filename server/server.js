@@ -68,6 +68,14 @@ const server = createServer(async (req, res) => {
 
 const wss = new WebSocketServer({ noServer: true })
 
+server.on('error', (err) => {
+  console.error('[Server] HTTP server error:', err)
+})
+
+wss.on('error', (err) => {
+  console.error('[Server] WebSocketServer error:', err)
+})
+
 server.on('upgrade', (request, socket, head) => {
   wss.handleUpgrade(request, socket, head, (ws) => {
     wss.emit('connection', ws, request)
@@ -88,13 +96,26 @@ function generateRoomCode() {
   return code
 }
 
+function safeSend(ws, data) {
+  if (!ws || ws.readyState !== 1) return
+  try {
+    ws.send(data)
+  } catch (err) {
+    console.error('[Server] Failed to send:', err)
+  }
+}
+
 wss.on('connection', (ws) => {
   let currentRoom = null
   let playerSide = null
-  let isAlive = true
+
+  // CRITICAL: must have error handler, otherwise unhandled error crashes the process
+  ws.on('error', (err) => {
+    console.error('[Server] WebSocket error:', err)
+  })
 
   ws.on('pong', () => {
-    isAlive = true
+    // browser auto-responds to protocol-level ping
   })
 
   ws.on('message', (data) => {
@@ -102,44 +123,44 @@ wss.on('connection', (ws) => {
     try {
       msg = JSON.parse(data.toString())
     } catch {
-      ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON' }))
+      safeSend(ws, JSON.stringify({ type: 'error', message: 'Invalid JSON' }))
       return
     }
 
     switch (msg.type) {
       case 'create': {
         if (currentRoom) {
-          ws.send(JSON.stringify({ type: 'error', message: 'Already in a room' }))
+          safeSend(ws, JSON.stringify({ type: 'error', message: 'Already in a room' }))
           return
         }
         const code = generateRoomCode()
         currentRoom = code
         playerSide = 'R'
         rooms.set(code, { host: ws, guest: null })
-        ws.send(JSON.stringify({ type: 'created', roomCode: code, side: 'R' }))
+        safeSend(ws, JSON.stringify({ type: 'created', roomCode: code, side: 'R' }))
         break
       }
 
       case 'join': {
         if (currentRoom) {
-          ws.send(JSON.stringify({ type: 'error', message: 'Already in a room' }))
+          safeSend(ws, JSON.stringify({ type: 'error', message: 'Already in a room' }))
           return
         }
         const room = rooms.get(msg.roomCode)
         if (!room) {
-          ws.send(JSON.stringify({ type: 'error', message: 'Room not found' }))
+          safeSend(ws, JSON.stringify({ type: 'error', message: 'Room not found' }))
           return
         }
         if (room.guest) {
-          ws.send(JSON.stringify({ type: 'error', message: 'Room is full' }))
+          safeSend(ws, JSON.stringify({ type: 'error', message: 'Room is full' }))
           return
         }
         currentRoom = msg.roomCode
         playerSide = 'B'
         room.guest = ws
-        ws.send(JSON.stringify({ type: 'joined', roomCode: msg.roomCode, side: 'B' }))
+        safeSend(ws, JSON.stringify({ type: 'joined', roomCode: msg.roomCode, side: 'B' }))
         if (room.host && room.host.readyState === 1) {
-          room.host.send(JSON.stringify({ type: 'opponent_joined' }))
+          safeSend(room.host, JSON.stringify({ type: 'opponent_joined' }))
         }
         break
       }
@@ -149,7 +170,7 @@ wss.on('connection', (ws) => {
         if (!room) return
         const target = playerSide === 'R' ? room.guest : room.host
         if (target && target.readyState === 1) {
-          target.send(JSON.stringify({ type: 'state', snapshot: msg.snapshot }))
+          safeSend(target, JSON.stringify({ type: 'state', snapshot: msg.snapshot }))
         }
         break
       }
@@ -159,13 +180,13 @@ wss.on('connection', (ws) => {
         if (!room) return
         const target = playerSide === 'R' ? room.guest : room.host
         if (target && target.readyState === 1) {
-          target.send(JSON.stringify({ type: 'reset' }))
+          safeSend(target, JSON.stringify({ type: 'reset' }))
         }
         break
       }
 
       case 'ping': {
-        ws.send(JSON.stringify({ type: 'pong' }))
+        safeSend(ws, JSON.stringify({ type: 'pong' }))
         break
       }
 
@@ -188,12 +209,12 @@ function leaveRoom(ws, roomCode) {
   if (!room) return
   if (room.host === ws) {
     if (room.guest && room.guest.readyState === 1) {
-      room.guest.send(JSON.stringify({ type: 'opponent_left' }))
+      safeSend(room.guest, JSON.stringify({ type: 'opponent_left' }))
     }
     rooms.delete(roomCode)
   } else if (room.guest === ws) {
     if (room.host && room.host.readyState === 1) {
-      room.host.send(JSON.stringify({ type: 'opponent_left' }))
+      safeSend(room.host, JSON.stringify({ type: 'opponent_left' }))
     }
     room.guest = null
   }
@@ -203,12 +224,25 @@ function leaveRoom(ws, roomCode) {
 const heartbeatInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (ws.readyState !== 1) return
-    ws.ping()
+    try {
+      ws.ping()
+    } catch (err) {
+      console.error('[Server] Ping failed:', err)
+    }
   })
 }, 30000)
 
 wss.on('close', () => {
   clearInterval(heartbeatInterval)
+})
+
+// Prevent process crash from unhandled errors
+process.on('uncaughtException', (err) => {
+  console.error('[Server] Uncaught exception:', err)
+})
+
+process.on('unhandledRejection', (err) => {
+  console.error('[Server] Unhandled rejection:', err)
 })
 
 server.listen(PORT, () => {
