@@ -116,7 +116,8 @@ export default function RemoteLobby({
 
   useEffect(() => {
     return () => {
-      clientRef.current?.disconnect()
+      // Don't disconnect here - the client is passed to Game.tsx via onReady
+      // and stays alive. Disconnection is handled by App.tsx handleHome.
     }
   }, [])
 
